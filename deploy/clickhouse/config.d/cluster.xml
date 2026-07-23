@@ -1,0 +1,38 @@
+<clickhouse>
+    <!-- Two shards, two replicas each. Node hostnames match the compose services. -->
+    <remote_servers replace="true">
+        <cluster_2s_2r>
+            <secret>local_cluster_secret</secret>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse-s1r1</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>secret</password>
+                </replica>
+                <replica>
+                    <host>clickhouse-s1r2</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>secret</password>
+                </replica>
+            </shard>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>clickhouse-s2r1</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>secret</password>
+                </replica>
+                <replica>
+                    <host>clickhouse-s2r2</host>
+                    <port>9000</port>
+                    <user>default</user>
+                    <password>secret</password>
+                </replica>
+            </shard>
+        </cluster_2s_2r>
+    </remote_servers>
+</clickhouse>

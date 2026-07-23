@@ -1,0 +1,14 @@
+<clickhouse>
+    <!-- Coordination via a single ClickHouse Keeper node (Zookeeper-compatible). -->
+    <zookeeper replace="true">
+        <node>
+            <host>clickhouse-keeper</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <!-- Run distributed DDL (ON CLUSTER ...) through Keeper. -->
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+</clickhouse>

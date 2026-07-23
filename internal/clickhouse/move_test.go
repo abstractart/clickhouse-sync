@@ -1,6 +1,22 @@
 package clickhouse
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestIsAlreadyOnTarget(t *testing.T) {
+	cases := map[string]bool{
+		"clickhouse returned 500: Code: 479. DB::Exception: All parts of partition '202401' are already on disk 'local'.": true,
+		"Code: 60. DB::Exception: Table demo.events_local does not exist.":                                                 false,
+		"clickhouse returned 500: parts are already on volume 'local'":                                                     true,
+	}
+	for msg, want := range cases {
+		if got := isAlreadyOnTarget(errors.New(msg)); got != want {
+			t.Errorf("isAlreadyOnTarget(%q) = %v, want %v", msg, got, want)
+		}
+	}
+}
 
 func TestMovePartitionSQL(t *testing.T) {
 	tests := []struct {

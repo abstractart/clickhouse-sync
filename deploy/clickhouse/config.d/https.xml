@@ -1,0 +1,15 @@
+<clickhouse>
+    <!-- The mover talks to ClickHouse strictly over HTTPS. -->
+    <https_port>8443</https_port>
+
+    <openSSL>
+        <server>
+            <certificateFile>/certs/server.crt</certificateFile>
+            <privateKeyFile>/certs/server.key</privateKeyFile>
+            <verificationMode>none</verificationMode>
+            <cacheSessions>true</cacheSessions>
+            <disableProtocols>sslv2,sslv3</disableProtocols>
+            <preferServerCiphers>true</preferServerCiphers>
+        </server>
+    </openSSL>
+</clickhouse>

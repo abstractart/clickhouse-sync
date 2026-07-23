@@ -1,0 +1,234 @@
+name: clickhouse-sync
+
+# Shared ClickHouse config files. They are mounted individually into the image's
+# own config.d directory. Bind-mounting the whole config.d directory and then
+# nesting the per-node macros file inside it does not work — a nested bind mount
+# cannot create its mountpoint inside another bind mount.
+
+# Reusable fragment for the four ClickHouse nodes.
+x-clickhouse: &clickhouse
+  image: clickhouse/clickhouse-server:26.3
+  ulimits:
+    nofile: { soft: 262144, hard: 262144 }
+  # The custom disks live under /var/lib/clickhouse/disks; make sure that
+  # directory is owned by the clickhouse user before the server (which drops
+  # privileges) tries to create the object_storage metadata folder there.
+  entrypoint:
+    - /bin/bash
+    - -c
+    - "mkdir -p /var/lib/clickhouse/disks && chown clickhouse:clickhouse /var/lib/clickhouse/disks && exec /entrypoint.sh"
+  depends_on:
+    clickhouse-keeper:
+      condition: service_started
+    certs:
+      condition: service_completed_successfully
+    seaweedfs-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "clickhouse-client", "--user", "default", "--password", "secret", "-q", "SELECT 1"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+
+services:
+  # --- Coordination -------------------------------------------------------
+  clickhouse-keeper:
+    image: clickhouse/clickhouse-keeper:26.3
+    container_name: clickhouse-keeper
+    volumes:
+      - ./keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper-data:/var/lib/clickhouse-keeper
+
+  # --- Object storage (SeaweedFS S3 gateway) ------------------------------
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.73
+    container_name: seaweedfs
+    command: "server -s3 -dir=/data -master.volumeSizeLimitMB=1024 -volume.max=0"
+    ports:
+      - "8333:8333"   # S3 API
+      - "9333:9333"   # master UI
+    volumes:
+      - seaweedfs-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9333/cluster/status"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:3.73
+    container_name: seaweedfs-init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/seaweedfs-init.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+
+  # --- TLS certificate generation (runs once) -----------------------------
+  certs:
+    image: alpine/openssl:latest
+    container_name: ch-certs
+    entrypoint: ["/bin/sh", "/scripts/gen-certs.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - certs:/certs
+
+  # --- ClickHouse cluster: 2 shards x 2 replicas --------------------------
+  clickhouse-s1r1:
+    <<: *clickhouse
+    container_name: clickhouse-s1r1
+    hostname: clickhouse-s1r1
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/https.xml:/etc/clickhouse-server/config.d/https.xml:ro
+      - ./clickhouse/users.d/default.xml:/etc/clickhouse-server/users.d/default.xml:ro
+      - certs:/certs:ro
+      - ./clickhouse/macros/s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch-s1r1:/var/lib/clickhouse
+
+  clickhouse-s1r2:
+    <<: *clickhouse
+    container_name: clickhouse-s1r2
+    hostname: clickhouse-s1r2
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/https.xml:/etc/clickhouse-server/config.d/https.xml:ro
+      - ./clickhouse/users.d/default.xml:/etc/clickhouse-server/users.d/default.xml:ro
+      - certs:/certs:ro
+      - ./clickhouse/macros/s1r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch-s1r2:/var/lib/clickhouse
+
+  clickhouse-s2r1:
+    <<: *clickhouse
+    container_name: clickhouse-s2r1
+    hostname: clickhouse-s2r1
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/https.xml:/etc/clickhouse-server/config.d/https.xml:ro
+      - ./clickhouse/users.d/default.xml:/etc/clickhouse-server/users.d/default.xml:ro
+      - certs:/certs:ro
+      - ./clickhouse/macros/s2r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch-s2r1:/var/lib/clickhouse
+
+  clickhouse-s2r2:
+    <<: *clickhouse
+    container_name: clickhouse-s2r2
+    hostname: clickhouse-s2r2
+    volumes:
+      - ./clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/config.d/zookeeper.xml:/etc/clickhouse-server/config.d/zookeeper.xml:ro
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./clickhouse/config.d/https.xml:/etc/clickhouse-server/config.d/https.xml:ro
+      - ./clickhouse/users.d/default.xml:/etc/clickhouse-server/users.d/default.xml:ro
+      - certs:/certs:ro
+      - ./clickhouse/macros/s2r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ch-s2r2:/var/lib/clickhouse
+
+  # --- One-shot: create the schema (no data) ------------------------------
+  schema:
+    image: curlimages/curl:8.8.0
+    container_name: ch-schema
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+      clickhouse-s1r2: { condition: service_healthy }
+      clickhouse-s2r1: { condition: service_healthy }
+      clickhouse-s2r2: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/scripts/create-schema.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles: ["init"]
+
+  # --- One-shot: load sample data into the existing schema ----------------
+  load:
+    image: curlimages/curl:8.8.0
+    container_name: ch-load
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/scripts/load-data.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles: ["init"]
+
+  # --- Show part placement per node and disk ------------------------------
+  #   docker compose -f deploy/docker-compose.yml run --rm show
+  show:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/scripts/show-parts.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles: ["tools"]
+
+  # --- Truncate the demo table (clean slate for manual testing) -----------
+  #   docker compose -f deploy/docker-compose.yml run --rm truncate
+  truncate:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/scripts/truncate.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles: ["tools"]
+
+  # --- List the S3 bucket backing the object_storage disk -----------------
+  # Shows how the bucket shrinks/empties as partitions are moved to local:
+  #   docker compose -f deploy/docker-compose.yml run --rm bucket
+  bucket:
+    image: curlimages/curl:8.8.0
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/scripts/show-bucket.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    profiles: ["tools"]
+
+  # --- Interactive clickhouse-client for shard #1 -------------------------
+  # Connects to a shard-1 node with all credentials baked in:
+  #   docker compose -f deploy/docker-compose.yml run --rm client
+  client:
+    image: clickhouse/clickhouse-server:26.3
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    profiles: ["tools"]
+    entrypoint:
+      - clickhouse-client
+      - --host=clickhouse-s1r1
+      - --user=default
+      - --password=secret
+      - --database=demo
+    stdin_open: true
+    tty: true
+
+  # --- The mover itself (runs inside the cluster network) -----------------
+  sync:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: clickhouse-sync:local
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    profiles: ["tools"]
+    # Args are provided on the command line, e.g.:
+    #   docker compose run --rm sync -user default -password secret \
+    #     -hostname clickhouse-s1r1 -database demo -table events_local \
+    #     -partition 202401 -partition-id -destination-disk local -insecure
+    command: ["-help"]
+
+volumes:
+  keeper-data:
+  seaweedfs-data:
+  certs:
+  ch-s1r1:
+  ch-s1r2:
+  ch-s2r1:
+  ch-s2r2:

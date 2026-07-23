@@ -1,0 +1,5 @@
+clickhouse-sync
+deploy
+*.md
+.git
+.gitignore

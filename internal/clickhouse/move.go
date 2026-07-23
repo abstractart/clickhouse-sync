@@ -2,8 +2,15 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 )
+
+// ErrAlreadyOnTarget is returned by MovePartition when every part of the
+// partition already resides on the destination disk. It makes the move
+// idempotent: re-running it is a no-op instead of an error.
+var ErrAlreadyOnTarget = errors.New("partition already on destination disk")
 
 // ClusterNodes returns the distinct host names of every node in the cluster.
 // If cluster is empty, nodes from all clusters known to the server are returned.
@@ -31,7 +38,23 @@ func MovePartitionSQL(database, table, partition, disk string, partitionIsID boo
 }
 
 // MovePartition runs the MOVE PARTITION statement on this node's connection.
+// If the partition is already fully on the destination disk, ClickHouse reports
+// error 479 ("All parts of partition ... are already on disk ..."); this is
+// translated into ErrAlreadyOnTarget so callers can treat it as success.
 func (c *Client) MovePartition(ctx context.Context, database, table, partition, disk string, partitionIsID bool) error {
 	_, err := c.Exec(ctx, MovePartitionSQL(database, table, partition, disk, partitionIsID))
-	return err
+	if err != nil {
+		if isAlreadyOnTarget(err) {
+			return ErrAlreadyOnTarget
+		}
+		return err
+	}
+	return nil
+}
+
+// isAlreadyOnTarget reports whether err is ClickHouse's "already on disk/volume"
+// response, which means there is nothing to move.
+func isAlreadyOnTarget(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "already on disk") || strings.Contains(msg, "already on volume")
 }

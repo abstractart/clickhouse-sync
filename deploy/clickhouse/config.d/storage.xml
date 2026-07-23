@@ -1,0 +1,39 @@
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <!-- Local disk on the node's filesystem. -->
+            <local>
+                <type>local</type>
+                <path>/var/lib/clickhouse/disks/local/</path>
+            </local>
+
+            <!-- Object storage disk backed by SeaweedFS' S3 gateway. -->
+            <object_storage>
+                <type>s3</type>
+                <endpoint>http://seaweedfs:8333/clickhouse/data/</endpoint>
+                <access_key_id>clickhouse</access_key_id>
+                <secret_access_key>clickhouse</secret_access_key>
+                <region>us-east-1</region>
+                <!-- SeaweedFS does not implement the S3 multi-object delete API. -->
+                <support_batch_delete>false</support_batch_delete>
+            </object_storage>
+        </disks>
+
+        <policies>
+            <!-- Tiered policy exposing both disks. New parts land on object_storage;
+                 the mover relocates them to the local disk. -->
+            <tiered>
+                <volumes>
+                    <object_storage>
+                        <disk>object_storage</disk>
+                    </object_storage>
+                    <local>
+                        <disk>local</disk>
+                    </local>
+                </volumes>
+                <!-- Keep parts where they are put unless explicitly moved. -->
+                <move_factor>0.0</move_factor>
+            </tiered>
+        </policies>
+    </storage_configuration>
+</clickhouse>

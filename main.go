@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -121,27 +122,34 @@ func run(ctx context.Context, cfg config) error {
 	fmt.Printf("Statement: %s\n\n", sql)
 
 	// 2. Run the move on every node.
-	var failures int
+	var failures, skipped int
 	for i, host := range nodes {
 		label := fmt.Sprintf("[%d/%d] %s", i+1, len(nodes), host)
 		if cfg.dryRun {
 			fmt.Printf("%s: (dry-run) would execute\n", label)
 			continue
 		}
-		if err := newClient(host).MovePartition(ctx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID); err != nil {
+		err := newClient(host).MovePartition(ctx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
+		switch {
+		case err == nil:
+			fmt.Printf("%s: OK\n", label)
+		case errors.Is(err, clickhouse.ErrAlreadyOnTarget):
+			// Idempotent no-op: the partition is already on the destination disk.
+			skipped++
+			fmt.Printf("%s: SKIP (already on disk %q)\n", label, cfg.disk)
+		default:
 			failures++
 			fmt.Printf("%s: FAILED: %v\n", label, err)
 			if !cfg.continueOnError {
 				return fmt.Errorf("aborting after failure on %s (use -continue-on-error to keep going)", host)
 			}
-			continue
 		}
-		fmt.Printf("%s: OK\n", label)
 	}
 
 	if failures > 0 {
 		return fmt.Errorf("%d of %d node(s) failed", failures, len(nodes))
 	}
-	fmt.Printf("\nDone: partition moved on all %d node(s).\n", len(nodes))
+	fmt.Printf("\nDone: partition present on disk %q on all %d node(s) (%d moved, %d already there).\n",
+		cfg.disk, len(nodes), len(nodes)-skipped, skipped)
 	return nil
 }
