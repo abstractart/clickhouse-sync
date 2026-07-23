@@ -19,6 +19,9 @@ import (
 	"clickhouse-sync/internal/clickhouse"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 type config struct {
 	user            string
 	password        string
@@ -52,7 +55,13 @@ func parseFlags() (config, error) {
 	flag.BoolVar(&c.dryRun, "dry-run", false, "Print the statements without executing the moves")
 	flag.BoolVar(&c.continueOnError, "continue-on-error", false, "Keep going if a node fails instead of stopping")
 	flag.DurationVar(&c.timeout, "timeout", 5*time.Minute, "Per-request timeout")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("clickhouse-sync %s\n", version)
+		os.Exit(0)
+	}
 
 	if c.password == "" {
 		c.password = os.Getenv("CLICKHOUSE_PASSWORD")
