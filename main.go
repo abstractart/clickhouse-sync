@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,13 +38,18 @@ type config struct {
 	dryRun          bool
 	continueOnError bool
 	timeout         time.Duration
+	connectTimeout  time.Duration
+	retries         int
+	retryDelay      time.Duration
+	nodesList       string
 }
 
 func parseFlags() (config, error) {
 	var c config
 	flag.StringVar(&c.user, "user", "", "ClickHouse username (required)")
 	flag.StringVar(&c.password, "password", "", "ClickHouse password (defaults to $CLICKHOUSE_PASSWORD)")
-	flag.StringVar(&c.hostname, "hostname", "", "Entry-point node hostname used to discover the cluster (required)")
+	flag.StringVar(&c.hostname, "hostname", "", "Entry-point node hostname used to discover the cluster (required unless -nodes is given)")
+	flag.StringVar(&c.nodesList, "nodes", "", "Comma-separated explicit node list to operate on; skips discovery (use to re-run against previously failed nodes)")
 	flag.IntVar(&c.port, "port", 8443, "ClickHouse HTTPS port")
 	flag.StringVar(&c.database, "database", "", "Database name (required)")
 	flag.StringVar(&c.table, "table", "", "Table name (required)")
@@ -54,7 +60,10 @@ func parseFlags() (config, error) {
 	flag.BoolVar(&c.insecure, "insecure", false, "Skip TLS certificate verification")
 	flag.BoolVar(&c.dryRun, "dry-run", false, "Print the statements without executing the moves")
 	flag.BoolVar(&c.continueOnError, "continue-on-error", false, "Keep going if a node fails instead of stopping")
-	flag.DurationVar(&c.timeout, "timeout", 5*time.Minute, "Per-request timeout")
+	flag.DurationVar(&c.timeout, "timeout", 5*time.Minute, "Overall per-request timeout, covering the MOVE operation")
+	flag.DurationVar(&c.connectTimeout, "connect-timeout", 10*time.Second, "Timeout for establishing the connection; unreachable nodes fail fast")
+	flag.IntVar(&c.retries, "retries", 2, "Number of retries on transient (network) errors, with exponential backoff")
+	flag.DurationVar(&c.retryDelay, "retry-delay", 2*time.Second, "Base backoff before the first retry (doubles each attempt)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -70,7 +79,6 @@ func parseFlags() (config, error) {
 	var missing []string
 	for name, val := range map[string]string{
 		"user":             c.user,
-		"hostname":         c.hostname,
 		"database":         c.database,
 		"table":            c.table,
 		"partition":        c.partition,
@@ -82,6 +90,10 @@ func parseFlags() (config, error) {
 	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("missing required flag(s): %v", missing)
+	}
+	// Node source: either discover via -hostname, or an explicit -nodes list.
+	if c.hostname == "" && c.nodesList == "" {
+		return c, fmt.Errorf("either -hostname (for discovery) or -nodes (explicit list) is required")
 	}
 	return c, nil
 }
@@ -112,33 +124,39 @@ func run(ctx context.Context, cfg config) error {
 			Password:           cfg.password,
 			InsecureSkipVerify: cfg.insecure,
 			Timeout:            cfg.timeout,
+			ConnectTimeout:     cfg.connectTimeout,
 		})
 	}
+	policy := clickhouse.RetryPolicy{Retries: cfg.retries, Delay: cfg.retryDelay}
 
-	// 1. Discover the cluster nodes via the system table on the entry point.
-	entry := newClient(cfg.hostname)
-	fmt.Printf("Discovering cluster nodes via %s ...\n", cfg.hostname)
-	nodes, err := entry.ClusterNodes(ctx, cfg.cluster)
+	// 1. Determine the target nodes: an explicit -nodes list, or discovery via
+	//    the entry point. Transient failures during discovery are retried.
+	nodes, err := targetNodes(ctx, cfg, newClient, policy)
 	if err != nil {
-		return fmt.Errorf("discovering cluster nodes: %w", err)
+		return err
 	}
 	if len(nodes) == 0 {
-		return fmt.Errorf("no nodes found in system.clusters (cluster=%q)", cfg.cluster)
+		return fmt.Errorf("no nodes to operate on")
 	}
-	fmt.Printf("Found %d node(s): %v\n", len(nodes), nodes)
+	fmt.Printf("Operating on %d node(s): %v\n", len(nodes), nodes)
 
 	sql := clickhouse.MovePartitionSQL(cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
 	fmt.Printf("Statement: %s\n\n", sql)
 
-	// 2. Run the move on every node.
-	var failures, skipped int
+	// 2. Run the move on every node. Transient (network) errors are retried per
+	//    node; ErrAlreadyOnTarget and query errors are final.
+	var failedNodes []string
+	var skipped int
 	for i, host := range nodes {
 		label := fmt.Sprintf("[%d/%d] %s", i+1, len(nodes), host)
 		if cfg.dryRun {
 			fmt.Printf("%s: (dry-run) would execute\n", label)
 			continue
 		}
-		err := newClient(host).MovePartition(ctx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
+		client := newClient(host)
+		err := clickhouse.Retry(ctx, policy, func() error {
+			return client.MovePartition(ctx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
+		})
 		switch {
 		case err == nil:
 			fmt.Printf("%s: OK\n", label)
@@ -147,18 +165,62 @@ func run(ctx context.Context, cfg config) error {
 			skipped++
 			fmt.Printf("%s: SKIP (already on disk %q)\n", label, cfg.disk)
 		default:
-			failures++
+			failedNodes = append(failedNodes, host)
 			fmt.Printf("%s: FAILED: %v\n", label, err)
 			if !cfg.continueOnError {
+				fmt.Fprintf(os.Stderr, "\nFailed node(s): %s\nRe-run against just these with: -nodes %s\n",
+					strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
 				return fmt.Errorf("aborting after failure on %s (use -continue-on-error to keep going)", host)
 			}
 		}
 	}
 
-	if failures > 0 {
-		return fmt.Errorf("%d of %d node(s) failed", failures, len(nodes))
+	if len(failedNodes) > 0 {
+		// Surface the failed nodes so the operator can re-drive just those once
+		// they recover; the move is idempotent, so a full re-run is also safe.
+		fmt.Fprintf(os.Stderr, "\nFailed node(s): %s\nRe-run against just these with: -nodes %s\n",
+			strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
+		return fmt.Errorf("%d of %d node(s) failed", len(failedNodes), len(nodes))
 	}
 	fmt.Printf("\nDone: partition present on disk %q on all %d node(s) (%d moved, %d already there).\n",
 		cfg.disk, len(nodes), len(nodes)-skipped, skipped)
 	return nil
+}
+
+// targetNodes returns the nodes to operate on: the explicit -nodes list when
+// given, otherwise the cluster topology discovered via the entry point.
+func targetNodes(ctx context.Context, cfg config, newClient func(string) *clickhouse.Client, policy clickhouse.RetryPolicy) ([]string, error) {
+	if cfg.nodesList != "" {
+		nodes := splitNodes(cfg.nodesList)
+		fmt.Printf("Using %d explicitly provided node(s), skipping discovery.\n", len(nodes))
+		return nodes, nil
+	}
+
+	entry := newClient(cfg.hostname)
+	fmt.Printf("Discovering cluster nodes via %s ...\n", cfg.hostname)
+	var nodes []string
+	err := clickhouse.Retry(ctx, policy, func() error {
+		var e error
+		nodes, e = entry.ClusterNodes(ctx, cfg.cluster)
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discovering cluster nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no nodes found in system.clusters (cluster=%q)", cfg.cluster)
+	}
+	return nodes, nil
+}
+
+// splitNodes parses a comma-separated node list, trimming spaces and dropping
+// empty entries.
+func splitNodes(s string) []string {
+	var nodes []string
+	for _, part := range strings.Split(s, ",") {
+		if host := strings.TrimSpace(part); host != "" {
+			nodes = append(nodes, host)
+		}
+	}
+	return nodes
 }
