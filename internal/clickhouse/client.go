@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -69,7 +70,17 @@ func New(o Options) *Client {
 // Exec sends a query and returns the raw response body. It returns an error if
 // ClickHouse answers with a non-2xx status.
 func (c *Client) Exec(ctx context.Context, query string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewBufferString(query))
+	return c.execWithID(ctx, query, "")
+}
+
+// execWithID is like Exec but tags the query with the given query_id (when
+// non-empty), so it can later be located in system.processes / system.query_log.
+func (c *Client) execWithID(ctx context.Context, query, queryID string) (string, error) {
+	reqURL := c.baseURL
+	if queryID != "" {
+		reqURL += "?query_id=" + url.QueryEscape(queryID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBufferString(query))
 	if err != nil {
 		return "", err
 	}

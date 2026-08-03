@@ -37,21 +37,6 @@ func MovePartitionSQL(database, table, partition, disk string, partitionIsID boo
 	return fmt.Sprintf("ALTER TABLE %s MOVE %s TO DISK %s", target, clause, quoteLiteral(disk))
 }
 
-// MovePartition runs the MOVE PARTITION statement on this node's connection.
-// If the partition is already fully on the destination disk, ClickHouse reports
-// error 479 ("All parts of partition ... are already on disk ..."); this is
-// translated into ErrAlreadyOnTarget so callers can treat it as success.
-func (c *Client) MovePartition(ctx context.Context, database, table, partition, disk string, partitionIsID bool) error {
-	_, err := c.Exec(ctx, MovePartitionSQL(database, table, partition, disk, partitionIsID))
-	if err != nil {
-		if isAlreadyOnTarget(err) {
-			return ErrAlreadyOnTarget
-		}
-		return err
-	}
-	return nil
-}
-
 // isAlreadyOnTarget reports whether err is ClickHouse's "already on disk/volume"
 // response, which means there is nothing to move.
 func isAlreadyOnTarget(err error) bool {
