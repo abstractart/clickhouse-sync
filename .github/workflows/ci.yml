@@ -27,3 +27,123 @@ jobs:
 
       - name: Integration tests
         run: go test -tags=integration -timeout 600s ./...
+
+  # On main, measure coverage once and publish it as an artifact so PRs can gate
+  # against it without recomputing the base branch on every run.
+  coverage-baseline:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Measure baseline coverage
+        run: |
+          go test -tags=integration -covermode=atomic -coverpkg=./... \
+            -coverprofile=cover.out -timeout 600s ./...
+          go tool cover -func=cover.out | awk '/^total:/ {print $3}' | tr -d '%' > coverage-base.txt
+          echo "baseline coverage: $(cat coverage-base.txt)%"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-base
+          path: coverage-base.txt
+          retention-days: 90
+
+  # On PRs, measure coverage once, pull the cached base coverage artifact, post a
+  # sticky comment, and fail if the PR lowers coverage beyond the tolerance.
+  coverage:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    env:
+      # Allowed drop before the gate fails, to absorb tiny run-to-run noise.
+      TOLERANCE: "0.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Coverage — this PR
+        run: |
+          go test -tags=integration -covermode=atomic -coverpkg=./... \
+            -coverprofile=head.out -timeout 600s ./...
+          echo "HEAD_COV=$(go tool cover -func=head.out | awk '/^total:/ {print $3}' | tr -d '%')" >> "$GITHUB_ENV"
+
+      - name: Fetch cached base coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=coverage-base&per_page=100" \
+            --jq '[.artifacts[] | select(.name=="coverage-base" and .expired==false)] | sort_by(.created_at) | last | .id // empty')
+          if [ -z "$id" ]; then
+            echo "no coverage-base artifact yet (baseline is produced on the next push to main)"
+            echo "BASE_COV=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > base.zip
+          unzip -o base.zip
+          echo "BASE_COV=$(cat coverage-base.txt)" >> "$GITHUB_ENV"
+
+      - name: Report and gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$BASE_COV" ]; then
+            cat > cov.md <<EOF
+          <!-- coverage-report -->
+          ## Test coverage
+
+          This PR: **${HEAD_COV}%** of statements.
+
+          No cached base coverage yet — the baseline is published on the next push
+          to \`main\`, after which PRs are gated against it.
+
+          <sub>Measured over unit + integration tests with \`-coverpkg=./...\`.</sub>
+          EOF
+            gh pr comment "$PR" --edit-last --body-file cov.md || gh pr comment "$PR" --body-file cov.md
+            exit 0
+          fi
+
+          delta=$(awk -v h="$HEAD_COV" -v b="$BASE_COV" 'BEGIN{printf "%+.1f", h-b}')
+          drop=$(awk -v h="$HEAD_COV" -v b="$BASE_COV" -v t="$TOLERANCE" 'BEGIN{print (h < b-t) ? "1":"0"}')
+          verdict="✅ coverage did not decrease"
+          if [ "$drop" = "1" ]; then
+            verdict="❌ coverage decreased beyond the ${TOLERANCE}% tolerance"
+          fi
+
+          cat > cov.md <<EOF
+          <!-- coverage-report -->
+          ## Test coverage
+
+          | | Statements |
+          | --- | --- |
+          | base (\`main\`) | ${BASE_COV}% |
+          | this PR | ${HEAD_COV}% |
+          | delta | ${delta}% |
+
+          ${verdict}
+
+          <sub>Measured over unit + integration tests with \`-coverpkg=./...\`. Base coverage is cached from the latest \`main\` build.</sub>
+          EOF
+
+          # --edit-last keeps a single sticky comment; on the first run it has
+          # nothing to edit, so fall back to creating one.
+          gh pr comment "$PR" --edit-last --body-file cov.md \
+            || gh pr comment "$PR" --body-file cov.md
+
+          if [ "$drop" = "1" ]; then
+            echo "PR coverage ${HEAD_COV}% is below base ${BASE_COV}% (tolerance ${TOLERANCE}%)"
+            exit 1
+          fi

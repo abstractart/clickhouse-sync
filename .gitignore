@@ -1,2 +1,4 @@
 /clickhouse-sync
 *.exe
+coverage.out
+head.out
