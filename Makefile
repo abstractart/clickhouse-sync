@@ -1,14 +1,18 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: build test up schema load init down clean demo move show client bucket truncate help
+.PHONY: build test test-integration up schema load init down clean demo move show client bucket truncate help
 
 ## build the mover binary
 build:
 	go build -o clickhouse-sync .
 
-## run unit tests
+## run fast unit tests (no Docker required)
 test:
 	go test ./...
+
+## run integration tests against a real ClickHouse via testcontainers (needs Docker)
+test-integration:
+	go test -tags=integration -timeout 600s -v ./...
 
 ## start the ClickHouse cluster + SeaweedFS
 up:

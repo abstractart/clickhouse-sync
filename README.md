@@ -174,6 +174,26 @@ docker compose -f deploy/docker-compose.yml --profile tools run --rm sync \
 
 ## Тесты
 
+Быстрые модульные тесты (Docker не нужен):
+
 ```sh
 go test ./...
+# или
+make test
 ```
+
+Интеграционные тесты поднимают настоящий ClickHouse через
+[testcontainers-go](https://golang.testcontainers.org/) и проверяют весь
+сценарий на реальном сервере: обнаружение узлов через `system.clusters`, перенос
+партиции между дисками (`MOVE PARTITION ... TO DISK`) и идемпотентность
+(повторный запуск возвращает `ErrAlreadyOnTarget`). Требуется запущенный Docker:
+
+```sh
+go test -tags=integration ./...
+# или
+make test-integration
+```
+
+Они автоматически заменяют ручную проверку через команды `make` — узел
+конфигурируется с HTTPS и storage-политикой из двух дисков (`default` + `cold`),
+данные загружаются, партиция переносится, результат проверяется.
