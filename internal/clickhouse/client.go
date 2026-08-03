@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -32,8 +34,13 @@ type Options struct {
 	Password string
 	// InsecureSkipVerify disables TLS certificate verification.
 	InsecureSkipVerify bool
-	// Timeout bounds each request. Zero means a sensible default.
+	// Timeout bounds the whole request, including the (potentially slow) MOVE
+	// operation. Zero means a sensible default.
 	Timeout time.Duration
+	// ConnectTimeout bounds only establishing the TCP+TLS connection, so an
+	// unreachable node fails fast instead of hanging until Timeout. Zero means a
+	// sensible default.
+	ConnectTimeout time.Duration
 }
 
 // New builds a Client for the given node. TLS (HTTPS) is always used.
@@ -42,8 +49,14 @@ func New(o Options) *Client {
 	if timeout == 0 {
 		timeout = 5 * time.Minute
 	}
+	connectTimeout := o.ConnectTimeout
+	if connectTimeout == 0 {
+		connectTimeout = 10 * time.Second
+	}
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: o.InsecureSkipVerify},
+		DialContext:         (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		TLSHandshakeTimeout: connectTimeout,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: o.InsecureSkipVerify},
 	}
 	return &Client{
 		baseURL:  fmt.Sprintf("https://%s:%d/", o.Host, o.Port),
@@ -67,7 +80,10 @@ func (c *Client) Exec(ctx context.Context, query string) (string, error) {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", err
+		// Do returns an error only when no valid HTTP response was received
+		// (dial/TLS failure, timeout, connection reset) — i.e. a transport-level
+		// problem that is typically transient and safe to retry.
+		return "", &TransportError{Err: err}
 	}
 	defer resp.Body.Close()
 
@@ -103,6 +119,20 @@ func (c *Client) QueryColumn(ctx context.Context, query string) ([]string, error
 func (c *Client) Ping(ctx context.Context) error {
 	_, err := c.Exec(ctx, "SELECT 1")
 	return err
+}
+
+// TransportError wraps a transport-level failure: the request never received a
+// valid HTTP response (dial/TLS failure, timeout, connection reset). A non-2xx
+// answer from ClickHouse is NOT a TransportError — that is a definitive reply.
+type TransportError struct{ Err error }
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// IsTransient reports whether err is a transport-level failure worth retrying.
+func IsTransient(err error) bool {
+	var te *TransportError
+	return errors.As(err, &te)
 }
 
 // quoteLiteral escapes a value for safe use as a ClickHouse string literal.
