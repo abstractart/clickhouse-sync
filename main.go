@@ -42,6 +42,7 @@ type config struct {
 	retries         int
 	retryDelay      time.Duration
 	nodesList       string
+	pollInterval    time.Duration
 }
 
 func parseFlags() (config, error) {
@@ -60,10 +61,11 @@ func parseFlags() (config, error) {
 	flag.BoolVar(&c.insecure, "insecure", false, "Skip TLS certificate verification")
 	flag.BoolVar(&c.dryRun, "dry-run", false, "Print the statements without executing the moves")
 	flag.BoolVar(&c.continueOnError, "continue-on-error", false, "Keep going if a node fails instead of stopping")
-	flag.DurationVar(&c.timeout, "timeout", 5*time.Minute, "Overall per-request timeout, covering the MOVE operation")
+	flag.DurationVar(&c.timeout, "timeout", 5*time.Minute, "Overall deadline for the whole MOVE on a node (kick-off + polling)")
 	flag.DurationVar(&c.connectTimeout, "connect-timeout", 10*time.Second, "Timeout for establishing the connection; unreachable nodes fail fast")
 	flag.IntVar(&c.retries, "retries", 2, "Number of retries on transient (network) errors, with exponential backoff")
 	flag.DurationVar(&c.retryDelay, "retry-delay", 2*time.Second, "Base backoff before the first retry (doubles each attempt)")
+	flag.DurationVar(&c.pollInterval, "poll-interval", 5*time.Second, "How often to poll MOVE progress on the server")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -155,7 +157,7 @@ func run(ctx context.Context, cfg config) error {
 		}
 		client := newClient(host)
 		err := clickhouse.Retry(ctx, policy, func() error {
-			return client.MovePartition(ctx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
+			return moveOnNode(ctx, client, cfg)
 		})
 		switch {
 		case err == nil:
@@ -185,6 +187,15 @@ func run(ctx context.Context, cfg config) error {
 	fmt.Printf("\nDone: partition present on disk %q on all %d node(s) (%d moved, %d already there).\n",
 		cfg.disk, len(nodes), len(nodes)-skipped, skipped)
 	return nil
+}
+
+// moveOnNode performs the partition move on a single node. -timeout bounds the
+// whole operation (kick-off + polling), not a single request.
+func moveOnNode(ctx context.Context, client *clickhouse.Client, cfg config) error {
+	opCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
+	defer cancel()
+	return client.MovePartition(opCtx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID,
+		clickhouse.MoveOptions{PollInterval: cfg.pollInterval})
 }
 
 // targetNodes returns the nodes to operate on: the explicit -nodes list when
