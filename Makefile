@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: build test test-integration up schema load init down clean demo move show client bucket truncate help
+.PHONY: build test test-integration cover cover-html up schema load init down clean demo move show client bucket truncate help
 
 ## build the mover binary
 build:
@@ -13,6 +13,15 @@ test:
 ## run integration tests against a real ClickHouse via testcontainers (needs Docker)
 test-integration:
 	go test -tags=integration -timeout 600s -v ./...
+
+## measure statement coverage over the full suite (unit + integration; needs Docker)
+cover:
+	go test -tags=integration -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -timeout 600s ./...
+	@go tool cover -func=coverage.out | tail -1
+
+## open the HTML coverage report (run `make cover` first)
+cover-html:
+	go tool cover -html=coverage.out
 
 ## start the ClickHouse cluster + SeaweedFS
 up:
