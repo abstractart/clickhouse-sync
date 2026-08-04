@@ -17,6 +17,21 @@
                 <!-- SeaweedFS does not implement the S3 multi-object delete API. -->
                 <support_batch_delete>false</support_batch_delete>
             </object_storage>
+
+            <!-- Local filesystem cache layered ON TOP of the S3 disk. Reads that
+                 miss go to SeaweedFS and are cached here on local disk; subsequent
+                 reads of the same file segments are served locally. This is the
+                 alternative to physically moving parts: data stays on S3 but hot
+                 segments live on a fast local disk after the first read. -->
+            <object_storage_cached>
+                <type>cache</type>
+                <disk>object_storage</disk>
+                <path>/var/lib/clickhouse/disks/s3_cache/</path>
+                <max_size>2Gi</max_size>
+                <!-- Cache whole segments even on small reads, so a scan warms the
+                     cache aggressively (clearer demo of miss -> hit). -->
+                <cache_on_write_operations>true</cache_on_write_operations>
+            </object_storage_cached>
         </disks>
 
         <policies>
@@ -34,6 +49,17 @@
                 <!-- Keep parts where they are put unless explicitly moved. -->
                 <move_factor>0.0</move_factor>
             </tiered>
+
+            <!-- Data lives on S3, read through the local filesystem cache. Used by
+                 the fscache demo (cmd/fscache) to show cache miss -> hit without
+                 ever moving a part. -->
+            <cached>
+                <volumes>
+                    <main>
+                        <disk>object_storage_cached</disk>
+                    </main>
+                </volumes>
+            </cached>
         </policies>
     </storage_configuration>
 </clickhouse>
