@@ -33,6 +33,7 @@ type config struct {
 	table           string
 	partition       string
 	disk            string
+	sourceDisk      string
 	cluster         string
 	partitionIsID   bool
 	insecure        bool
@@ -58,6 +59,7 @@ func parseFlags() (config, error) {
 	flag.StringVar(&c.table, "table", "", "Table name (required)")
 	flag.StringVar(&c.partition, "partition", "", "Partition value (or id, see -partition-id) to move (required)")
 	flag.StringVar(&c.disk, "destination-disk", "", "Destination disk name (required)")
+	flag.StringVar(&c.sourceDisk, "source-disk", "", "Only move parts currently on this disk (default: any disk except the destination)")
 	flag.StringVar(&c.cluster, "cluster", "", "Cluster name in system.clusters; empty means all known nodes")
 	flag.BoolVar(&c.partitionIsID, "partition-id", false, "Treat -partition as a partition id (MOVE PARTITION ID)")
 	flag.BoolVar(&c.insecure, "insecure", false, "Skip TLS certificate verification")
@@ -99,6 +101,9 @@ func parseFlags() (config, error) {
 	// Node source: either discover via -hostname, or an explicit -nodes list.
 	if c.hostname == "" && c.nodesList == "" {
 		return c, fmt.Errorf("either -hostname (for discovery) or -nodes (explicit list) is required")
+	}
+	if c.sourceDisk != "" && c.sourceDisk == c.disk {
+		return c, fmt.Errorf("-source-disk and -destination-disk must differ")
 	}
 	return c, nil
 }
@@ -145,7 +150,11 @@ func run(ctx context.Context, cfg config) error {
 	}
 	fmt.Printf("Operating on %d node(s): %v\n", len(nodes), nodes)
 
-	fmt.Printf("Moving partition %q of %s.%s to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.disk)
+	if cfg.sourceDisk != "" {
+		fmt.Printf("Moving partition %q of %s.%s from disk %q to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.sourceDisk, cfg.disk)
+	} else {
+		fmt.Printf("Moving partition %q of %s.%s to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.disk)
+	}
 
 	// 2. On every node, enumerate the partition's parts and move them one at a
 	//    time. Before each part we show the node's destination-disk capacity and
@@ -163,7 +172,7 @@ func run(ctx context.Context, cfg config) error {
 		var parts []clickhouse.Part
 		if err := clickhouse.Retry(ctx, policy, func() error {
 			var e error
-			parts, e = client.PartitionParts(ctx, cfg.database, cfg.table, cfg.partition, cfg.partitionIsID, cfg.disk)
+			parts, e = client.PartitionParts(ctx, cfg.database, cfg.table, cfg.partition, cfg.partitionIsID, cfg.sourceDisk, cfg.disk)
 			return e
 		}); err != nil {
 			failedNodes = appendUnique(failedNodes, host)
@@ -174,7 +183,11 @@ func run(ctx context.Context, cfg config) error {
 			continue
 		}
 		if len(parts) == 0 {
-			fmt.Printf("%s: nothing to move (no parts outside disk %q)\n", nodeLabel, cfg.disk)
+			if cfg.sourceDisk != "" {
+				fmt.Printf("%s: nothing to move (no parts on disk %q)\n", nodeLabel, cfg.sourceDisk)
+			} else {
+				fmt.Printf("%s: nothing to move (no parts outside disk %q)\n", nodeLabel, cfg.disk)
+			}
 			continue
 		}
 		fmt.Printf("%s: %d part(s), %s to move to disk %q\n", nodeLabel, len(parts), humanBytes(totalBytes(parts)), cfg.disk)
