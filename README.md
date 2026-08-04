@@ -120,10 +120,10 @@ go build -o clickhouse-sync ./cmd/mover
 
 ```
 [node 1/3] ch-node-1: 2 part(s), 3.0 GiB to move to disk "cold"
-    202401_1_1_0 (2.0 GiB): disk "cold" — free 400.0 GiB / 500.0 GiB, used 20.0% -> 20.4% after this part
+    202401_1_1_0 (2.0 GiB): move from disk "object_storage" to "cold" — free 400.0 GiB / 500.0 GiB, used 20.0% -> 20.4% after this part
     Move part 202401_1_1_0 on ch-node-1? [y/N/a=yes to all]: y
-  [part 1/2] 202401_1_1_0: OK
-    202401_2_2_0 (1.0 GiB): disk "cold" — free 398.0 GiB / 500.0 GiB, used 20.4% -> 20.6% after this part
+  [part 1/2] 202401_1_1_0: OK (moved from disk "object_storage" to "cold")
+    202401_2_2_0 (1.0 GiB): move from disk "object_storage" to "cold" — free 398.0 GiB / 500.0 GiB, used 20.4% -> 20.6% after this part
     Move part 202401_2_2_0 on ch-node-1? [y/N/a=yes to all]: n
   [part 2/2] 202401_2_2_0: SKIPPED (declined)
 ```
