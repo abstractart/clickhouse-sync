@@ -165,6 +165,12 @@ activity; after the swap the cold read pulled 28.73 MiB from S3 and the warm rea
 served the same 28.73 MiB entirely from cache (0 B from S3), with identical row
 count and checksum — no part moved.
 
+Reproduce the whole swap end-to-end (needs `make up`):
+
+```sh
+make fscache-swap-demo   # deploy/scripts/fscache-inplace-swap.sh
+```
+
 ### Caveats
 
 - **Per replica.** Each node has its own local metadata and config; roll the
