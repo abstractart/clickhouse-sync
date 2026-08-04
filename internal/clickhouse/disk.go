@@ -50,32 +50,47 @@ func (c *Client) DiskInfo(ctx context.Context, disk string) (DiskInfo, error) {
 	return DiskInfo{Name: disk, Total: total, Free: free}, nil
 }
 
-// PartitionBytesToMove returns the on-disk size of the active parts of the
-// partition that are NOT already on destDisk — i.e. the bytes the move will add
-// to destDisk on this node. Parts already on destDisk are excluded, so the figure
-// matches the idempotent MOVE (which skips them).
-func (c *Client) PartitionBytesToMove(ctx context.Context, database, table, partition string, partitionIsID bool, destDisk string) (uint64, error) {
+// Part identifies one active data part and its on-disk footprint.
+type Part struct {
+	Name  string
+	Bytes uint64 // bytes_on_disk
+	Disk  string // disk_name it currently resides on
+}
+
+// PartitionParts returns the active parts of the partition that are NOT already
+// on destDisk — i.e. the parts a per-part move would relocate on this node. Parts
+// already on destDisk are excluded, so the list matches the idempotent moves
+// (which skip them). Results are ordered by part name for deterministic output.
+func (c *Client) PartitionParts(ctx context.Context, database, table, partition string, partitionIsID bool, destDisk string) ([]Part, error) {
 	col := "partition"
 	if partitionIsID {
 		col = "partition_id"
 	}
-	q := "SELECT sum(bytes_on_disk) FROM system.parts WHERE active" +
+	q := "SELECT name, bytes_on_disk, disk_name FROM system.parts WHERE active" +
 		" AND database = " + quoteLiteral(database) +
 		" AND table = " + quoteLiteral(table) +
 		" AND " + col + " = " + quoteLiteral(partition) +
-		" AND disk_name != " + quoteLiteral(destDisk)
+		" AND disk_name != " + quoteLiteral(destDisk) +
+		" ORDER BY name"
 	out, err := c.Exec(ctx, q+"\nFORMAT TabSeparated")
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	line := strings.TrimSpace(out)
-	// sum() over no matching rows yields 0; guard against an empty/NULL body too.
-	if line == "" || line == `\N` {
-		return 0, nil
+
+	var parts []Part
+	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("unexpected system.parts row: %q", line)
+		}
+		b, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing bytes_on_disk for part %q: %w", fields[0], err)
+		}
+		parts = append(parts, Part{Name: fields[0], Bytes: b, Disk: fields[2]})
 	}
-	n, err := strconv.ParseUint(line, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parsing partition size: %w", err)
-	}
-	return n, nil
+	return parts, nil
 }

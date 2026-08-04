@@ -112,6 +112,32 @@ func TestMovePartitionAlreadyOnTarget(t *testing.T) {
 	}
 }
 
+func TestMovePartSuccess(t *testing.T) {
+	fs := &fakeServer{alterDelay: 40 * time.Millisecond}
+	srv := httptest.NewTLSServer(http.HandlerFunc(fs.handler))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := newClientFor(t, srv).MovePart(ctx, "db", "t", "all_1_1_0", "cold",
+		MoveOptions{PollInterval: 20 * time.Millisecond, StatusTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+}
+
+func TestMovePartGone(t *testing.T) {
+	fs := &fakeServer{alterStatus: http.StatusInternalServerError, alterBody: "Code: 232. DB::Exception: No part all_1_1_0 in committed state"}
+	srv := httptest.NewTLSServer(http.HandlerFunc(fs.handler))
+	defer srv.Close()
+
+	err := newClientFor(t, srv).MovePart(context.Background(), "db", "t", "all_1_1_0", "cold",
+		MoveOptions{PollInterval: time.Second, StatusTimeout: time.Second})
+	if !errors.Is(err, ErrPartGone) {
+		t.Fatalf("expected ErrPartGone, got %v", err)
+	}
+}
+
 func TestMovePartitionDeadline(t *testing.T) {
 	fs := &fakeServer{alterHang: true} // never returns; the deadline must fire
 	srv := httptest.NewTLSServer(http.HandlerFunc(fs.handler))

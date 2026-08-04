@@ -5,9 +5,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"clickhouse-sync/internal/clickhouse"
 )
 
-func TestConfirmNodeMove(t *testing.T) {
+func TestConfirmPartMove(t *testing.T) {
 	cases := []struct {
 		in                       string
 		proceed, all, wantErrNil bool
@@ -22,11 +24,29 @@ func TestConfirmNodeMove(t *testing.T) {
 		{"", false, false, false},  // EOF, no data -> error
 	}
 	for _, c := range cases {
-		proceed, all, err := confirmNodeMove("node", bufio.NewReader(strings.NewReader(c.in)))
+		proceed, all, err := confirmPartMove("node", "all_1_1_0", bufio.NewReader(strings.NewReader(c.in)))
 		if proceed != c.proceed || all != c.all || (err == nil) != c.wantErrNil {
-			t.Errorf("confirmNodeMove(%q) = (%v, %v, err=%v), want (%v, %v, errNil=%v)",
+			t.Errorf("confirmPartMove(%q) = (%v, %v, err=%v), want (%v, %v, errNil=%v)",
 				c.in, proceed, all, err, c.proceed, c.all, c.wantErrNil)
 		}
+	}
+}
+
+func TestTotalBytes(t *testing.T) {
+	if got := totalBytes(nil); got != 0 {
+		t.Errorf("totalBytes(nil) = %d, want 0", got)
+	}
+	parts := []clickhouse.Part{{Bytes: 100}, {Bytes: 250}, {Bytes: 1}}
+	if got := totalBytes(parts); got != 351 {
+		t.Errorf("totalBytes = %d, want 351", got)
+	}
+}
+
+func TestAppendUnique(t *testing.T) {
+	got := appendUnique(appendUnique(appendUnique(nil, "a"), "b"), "a")
+	want := []string{"a", "b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("appendUnique = %v, want %v", got, want)
 	}
 }
 
