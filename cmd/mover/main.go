@@ -150,11 +150,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 	fmt.Printf("Operating on %d node(s): %v\n", len(nodes), nodes)
 
-	if cfg.sourceDisk != "" {
-		fmt.Printf("Moving partition %q of %s.%s from disk %q to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.sourceDisk, cfg.disk)
-	} else {
-		fmt.Printf("Moving partition %q of %s.%s to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.disk)
-	}
+	fmt.Printf("%s\n\n", moveHeadline(cfg))
 
 	// 2. On every node, enumerate the partition's parts and move them one at a
 	//    time. Before each part we show the node's destination-disk capacity and
@@ -183,11 +179,7 @@ func run(ctx context.Context, cfg config) error {
 			continue
 		}
 		if len(parts) == 0 {
-			if cfg.sourceDisk != "" {
-				fmt.Printf("%s: nothing to move (no parts on disk %q)\n", nodeLabel, cfg.sourceDisk)
-			} else {
-				fmt.Printf("%s: nothing to move (no parts outside disk %q)\n", nodeLabel, cfg.disk)
-			}
+			fmt.Printf("%s: nothing to move (%s)\n", nodeLabel, nothingToMoveReason(cfg))
 			continue
 		}
 		fmt.Printf("%s: %d part(s), %s to move to disk %q\n", nodeLabel, len(parts), humanBytes(totalBytes(parts)), cfg.disk)
@@ -276,6 +268,26 @@ func abort(failedNodes []string, what string) error {
 	fmt.Fprintf(os.Stderr, "\nNode(s) with failed part move(s): %s\nRe-run against just these with: -nodes %s\n",
 		strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
 	return fmt.Errorf("aborting after failure (%s); use -continue-on-error to keep going", what)
+}
+
+// moveHeadline is the one-line summary printed before the per-node loop. It names
+// the source disk only when -source-disk narrows the selection.
+func moveHeadline(cfg config) string {
+	if cfg.sourceDisk != "" {
+		return fmt.Sprintf("Moving partition %q of %s.%s from disk %q to disk %q, part by part.",
+			cfg.partition, cfg.database, cfg.table, cfg.sourceDisk, cfg.disk)
+	}
+	return fmt.Sprintf("Moving partition %q of %s.%s to disk %q, part by part.",
+		cfg.partition, cfg.database, cfg.table, cfg.disk)
+}
+
+// nothingToMoveReason explains why a node had no parts to move, matching the
+// filter that was applied (a specific source disk, or "not on the destination").
+func nothingToMoveReason(cfg config) string {
+	if cfg.sourceDisk != "" {
+		return fmt.Sprintf("no parts on disk %q", cfg.sourceDisk)
+	}
+	return fmt.Sprintf("no parts outside disk %q", cfg.disk)
 }
 
 // totalBytes sums the on-disk size of the given parts.
