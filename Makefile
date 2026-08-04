@@ -1,10 +1,14 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: build test test-integration cover cover-html up schema load init down clean demo move show client bucket truncate help
+# Packages that count toward coverage: everything except the fscache demo, which
+# is a manual research stand with no automated tests.
+COVERPKG := $(shell go list ./... | grep -v '/cmd/fscache' | paste -sd, -)
+
+.PHONY: build test test-integration cover cover-html up schema load init down clean demo move show client bucket truncate fscache-demo help
 
 ## build the mover binary
 build:
-	go build -o clickhouse-sync .
+	go build -o clickhouse-sync ./cmd/mover
 
 ## run fast unit tests (no Docker required)
 test:
@@ -16,7 +20,7 @@ test-integration:
 
 ## measure statement coverage over the full suite (unit + integration; needs Docker)
 cover:
-	go test -tags=integration -covermode=atomic -coverpkg=./... -coverprofile=coverage.out -timeout 600s ./...
+	go test -tags=integration -covermode=atomic -coverpkg=$(COVERPKG) -coverprofile=coverage.out -timeout 600s ./...
 	@go tool cover -func=coverage.out | tail -1
 
 ## open the HTML coverage report (run `make cover` first)
@@ -58,6 +62,10 @@ show:
 ## list objects in the S3 bucket backing the object_storage disk
 bucket:
 	$(COMPOSE) --profile tools run --rm bucket
+
+## run the filesystem_cache demo (S3 + local cache; shows cold read vs warm cache hit)
+fscache-demo:
+	$(COMPOSE) --profile tools run --rm fscache
 
 ## fully empty demo.events_local (clean slate; re-run `make init` to reload data)
 truncate:

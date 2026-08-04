@@ -42,7 +42,8 @@ jobs:
 
       - name: Measure baseline coverage
         run: |
-          go test -tags=integration -covermode=atomic -coverpkg=./... \
+          coverpkg=$(go list ./... | grep -v '/cmd/fscache' | paste -sd, -)
+          go test -tags=integration -covermode=atomic -coverpkg="$coverpkg" \
             -coverprofile=cover.out -timeout 600s ./...
           go tool cover -func=cover.out | awk '/^total:/ {print $3}' | tr -d '%' > coverage-base.txt
           echo "baseline coverage: $(cat coverage-base.txt)%"
@@ -75,7 +76,8 @@ jobs:
 
       - name: Coverage — this PR
         run: |
-          go test -tags=integration -covermode=atomic -coverpkg=./... \
+          coverpkg=$(go list ./... | grep -v '/cmd/fscache' | paste -sd, -)
+          go test -tags=integration -covermode=atomic -coverpkg="$coverpkg" \
             -coverprofile=head.out -timeout 600s ./...
           echo "HEAD_COV=$(go tool cover -func=head.out | awk '/^total:/ {print $3}' | tr -d '%')" >> "$GITHUB_ENV"
 

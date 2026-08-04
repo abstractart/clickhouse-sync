@@ -224,6 +224,21 @@ services:
     #     -partition 202401 -partition-id -destination-disk local -insecure
     command: ["-help"]
 
+  # --- filesystem_cache demo (runs inside the cluster network) ------------
+  # Shows the alternative to moving parts: data stays on S3, the first read
+  # warms a local cache, later reads are served locally.
+  #   docker compose -f deploy/docker-compose.yml run --rm fscache
+  fscache:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: clickhouse-sync:local
+    depends_on:
+      clickhouse-s1r1: { condition: service_healthy }
+    profiles: ["tools"]
+    entrypoint: ["fscache"]
+    command: ["-hostname", "clickhouse-s1r1", "-password", "secret", "-insecure"]
+
 volumes:
   keeper-data:
   seaweedfs-data:

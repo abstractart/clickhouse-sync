@@ -37,7 +37,7 @@ jobs:
           version="${GITHUB_REF_NAME}"
           name="clickhouse-sync-${GOOS}-${GOARCH}"
           [ "${GOOS}" = "windows" ] && name="${name}.exe"
-          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" .
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" ./cmd/mover
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
