@@ -57,20 +57,27 @@ type Part struct {
 	Disk  string // disk_name it currently resides on
 }
 
-// PartitionParts returns the active parts of the partition that are NOT already
-// on destDisk — i.e. the parts a per-part move would relocate on this node. Parts
-// already on destDisk are excluded, so the list matches the idempotent moves
-// (which skip them). Results are ordered by part name for deterministic output.
-func (c *Client) PartitionParts(ctx context.Context, database, table, partition string, partitionIsID bool, destDisk string) ([]Part, error) {
+// PartitionParts returns the active parts of the partition to relocate on this
+// node, ordered by part name for deterministic output.
+//
+// When sourceDisk is non-empty, only parts currently on that disk are returned
+// (move strictly from sourceDisk to destDisk). When sourceDisk is empty, every
+// part NOT already on destDisk is returned — so parts already on the destination
+// are excluded either way, matching the idempotent moves (which skip them).
+func (c *Client) PartitionParts(ctx context.Context, database, table, partition string, partitionIsID bool, sourceDisk, destDisk string) ([]Part, error) {
 	col := "partition"
 	if partitionIsID {
 		col = "partition_id"
+	}
+	diskFilter := " AND disk_name != " + quoteLiteral(destDisk)
+	if sourceDisk != "" {
+		diskFilter = " AND disk_name = " + quoteLiteral(sourceDisk)
 	}
 	q := "SELECT name, bytes_on_disk, disk_name FROM system.parts WHERE active" +
 		" AND database = " + quoteLiteral(database) +
 		" AND table = " + quoteLiteral(table) +
 		" AND " + col + " = " + quoteLiteral(partition) +
-		" AND disk_name != " + quoteLiteral(destDisk) +
+		diskFilter +
 		" ORDER BY name"
 	out, err := c.Exec(ctx, q+"\nFORMAT TabSeparated")
 	if err != nil {

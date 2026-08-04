@@ -76,6 +76,25 @@ func TestParseFlags(t *testing.T) {
 			t.Fatalf("password = %q, want it from the env", c.password)
 		}
 	})
+
+	t.Run("source equals destination", func(t *testing.T) {
+		_, err := parse("-user", "u", "-hostname", "h", "-database", "db", "-table", "t",
+			"-partition", "p", "-destination-disk", "cold", "-source-disk", "cold")
+		if err == nil || !strings.Contains(err.Error(), "must differ") {
+			t.Fatalf("want source!=destination error, got %v", err)
+		}
+	})
+
+	t.Run("source disk set", func(t *testing.T) {
+		c, err := parse("-user", "u", "-hostname", "h", "-database", "db", "-table", "t",
+			"-partition", "p", "-destination-disk", "cold", "-source-disk", "warm")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.sourceDisk != "warm" {
+			t.Fatalf("sourceDisk = %q", c.sourceDisk)
+		}
+	})
 }
 
 func TestConfirmPartMove(t *testing.T) {
@@ -98,6 +117,29 @@ func TestConfirmPartMove(t *testing.T) {
 			t.Errorf("confirmPartMove(%q) = (%v, %v, err=%v), want (%v, %v, errNil=%v)",
 				c.in, proceed, all, err, c.proceed, c.all, c.wantErrNil)
 		}
+	}
+}
+
+func TestMoveHeadline(t *testing.T) {
+	base := config{partition: "202401", database: "demo", table: "events", disk: "cold"}
+	if got := moveHeadline(base); !strings.Contains(got, `to disk "cold"`) || strings.Contains(got, "from disk") {
+		t.Errorf("without source: %q", got)
+	}
+	withSrc := base
+	withSrc.sourceDisk = "warm"
+	if got := moveHeadline(withSrc); !strings.Contains(got, `from disk "warm" to disk "cold"`) {
+		t.Errorf("with source: %q", got)
+	}
+}
+
+func TestNothingToMoveReason(t *testing.T) {
+	base := config{disk: "cold"}
+	if got := nothingToMoveReason(base); got != `no parts outside disk "cold"` {
+		t.Errorf("without source: %q", got)
+	}
+	withSrc := config{disk: "cold", sourceDisk: "warm"}
+	if got := nothingToMoveReason(withSrc); got != `no parts on disk "warm"` {
+		t.Errorf("with source: %q", got)
 	}
 }
 
