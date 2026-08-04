@@ -181,6 +181,45 @@ count and checksum — no part moved.
 - Re-tune the cache on the new cache disk afterwards (`max_size`, `cache_policy`,
   `bypass_cache_threshold`, …).
 
+### Why moving partitions between tables doesn't help (DETACH/ATTACH)
+
+A tempting idea: create a new table whose S3 volume is the `cache` disk, then move
+the partitions over "as is" (they stay on their disks) and swap table names — no
+full copy. It does **not** work, because a part is read through the disk it lives
+on, so to be cached it must physically end up **on the cache disk** — and the
+cache disk is a *different* disk from the raw S3 disk (even pointing at the same
+bucket path). Measured on 26.3, source table on `tiered` (partition on `local`,
+partition on `object_storage`), destination on a `local` + `object_storage_cached`
+policy:
+
+| Operation | Result | S3 ops |
+| --- | --- | --- |
+| `MOVE PARTITION … TO TABLE` (local **and** S3) | rejected — `should have the same storage policy … tiered vs tiered_cache` (the whole policy is compared, not per part) | — |
+| `ATTACH PARTITION FROM` (local → local) | metadata-only (**hardlink**) | `0 copy, 0 PUT, 0 GET` |
+| `ATTACH PARTITION FROM` (S3 → **cache disk**) | **physical copy**, data duplicated in the bucket | `0 CopyObject, 19 PUT, 28 GET` |
+
+Why the asymmetry:
+
+- A part is a set of files: for an s3 disk, small local pointer files plus the
+  actual objects in the bucket.
+- `ATTACH PARTITION FROM` **within the same disk** just hardlinks those files —
+  instant, no extra space. That is why the `local → local` move was free.
+- `ATTACH PARTITION FROM` **across disks** cannot hardlink; the destination disk
+  must own its **own** objects, so ClickHouse re-reads the source (GET) and writes
+  new objects (PUT). The data now exists twice in the bucket until the source is
+  dropped — and here it was a full read+write, not even a server-side `CopyObject`.
+- Sharing the same bucket path does **not** help: ClickHouse treats each disk as
+  an independent namespace with per-disk object ownership. The only zero-copy
+  object sharing (`allow_remote_fs_zero_copy_replication`) is for **replicas of
+  one table on the same disk** across nodes, not for moving a part between disks
+  or tables.
+
+So this approach moves the hot (`local`) parts for free — the ones that don't need
+caching — while **physically copying exactly the S3 parts you wanted to cache**.
+Net: no cheaper than `INSERT SELECT`. The in-place disk swap above is the only
+no-copy path, and for a two-disk table you apply it **only to the S3 disk**,
+leaving `local` untouched.
+
 ## Reproduce
 
 ```sh
