@@ -186,8 +186,13 @@ func run(ctx context.Context, cfg config) error {
 			// already moved on this node.
 			printPartCapacity(ctx, cfg, client, host, part, policy)
 
+			// Show the exact statement that will run for this part, so it is
+			// visible before the confirmation (and in dry-run).
+			sql := clickhouse.MovePartSQL(cfg.database, cfg.table, part.Name, cfg.disk)
+			fmt.Printf("      SQL: %s\n", sql)
+
 			if cfg.dryRun {
-				fmt.Printf("%s: (dry-run) would move\n", partLabel)
+				fmt.Printf("%s: (dry-run) would run the SQL above\n", partLabel)
 				continue
 			}
 			if !assumeYes {
@@ -211,7 +216,7 @@ func run(ctx context.Context, cfg config) error {
 			switch {
 			case err == nil:
 				moved++
-				fmt.Printf("%s: OK\n", partLabel)
+				fmt.Printf("%s: OK (moved from disk %q to %q)\n", partLabel, part.Disk, cfg.disk)
 			case errors.Is(err, clickhouse.ErrAlreadyOnTarget):
 				skipped++
 				fmt.Printf("%s: SKIP (already on disk %q)\n", partLabel, cfg.disk)
@@ -300,13 +305,13 @@ func printPartCapacity(ctx context.Context, cfg config, client *clickhouse.Clien
 		di, e = client.DiskInfo(ctx, cfg.disk)
 		return e
 	}); err != nil {
-		fmt.Printf("    %s (%s): disk %q — could not read capacity: %v\n", part.Name, humanBytes(part.Bytes), cfg.disk, err)
+		fmt.Printf("    %s (%s): move from disk %q to %q — could not read capacity: %v\n", part.Name, humanBytes(part.Bytes), part.Disk, cfg.disk, err)
 		return
 	}
 
 	used := di.Used()
-	line := fmt.Sprintf("    %s (%s): disk %q — free %s / %s, used %.1f%% -> %.1f%% after this part",
-		part.Name, humanBytes(part.Bytes), cfg.disk, humanBytes(di.Free), humanBytes(di.Total),
+	line := fmt.Sprintf("    %s (%s): move from disk %q to %q — free %s / %s, used %.1f%% -> %.1f%% after this part",
+		part.Name, humanBytes(part.Bytes), part.Disk, cfg.disk, humanBytes(di.Free), humanBytes(di.Total),
 		percent(used, di.Total), percent(used+part.Bytes, di.Total))
 	if part.Bytes > di.Free {
 		line += "  !! part is larger than the free space"

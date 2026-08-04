@@ -2,12 +2,81 @@ package main
 
 import (
 	"bufio"
+	"flag"
+	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"clickhouse-sync/internal/clickhouse"
 )
+
+func TestParseFlags(t *testing.T) {
+	origArgs, origCmd := os.Args, flag.CommandLine
+	t.Cleanup(func() { os.Args, flag.CommandLine = origArgs, origCmd })
+	t.Setenv("CLICKHOUSE_PASSWORD", "") // deterministic base
+
+	parse := func(args ...string) (config, error) {
+		flag.CommandLine = flag.NewFlagSet("clickhouse-sync", flag.ContinueOnError)
+		flag.CommandLine.SetOutput(io.Discard)
+		os.Args = append([]string{"clickhouse-sync"}, args...)
+		return parseFlags()
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		c, err := parse("-user", "u", "-hostname", "h", "-database", "db",
+			"-table", "t", "-partition", "202401", "-destination-disk", "cold")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.user != "u" || c.hostname != "h" || c.database != "db" || c.table != "t" ||
+			c.partition != "202401" || c.disk != "cold" {
+			t.Fatalf("bad config: %+v", c)
+		}
+		if c.port != 8443 || c.timeout != 5*time.Minute {
+			t.Fatalf("defaults not applied: %+v", c)
+		}
+	})
+
+	t.Run("missing required", func(t *testing.T) {
+		if _, err := parse("-hostname", "h"); err == nil || !strings.Contains(err.Error(), "missing required") {
+			t.Fatalf("want missing-required error, got %v", err)
+		}
+	})
+
+	t.Run("neither hostname nor nodes", func(t *testing.T) {
+		_, err := parse("-user", "u", "-database", "db", "-table", "t",
+			"-partition", "p", "-destination-disk", "cold")
+		if err == nil || !strings.Contains(err.Error(), "-hostname") {
+			t.Fatalf("want hostname/nodes error, got %v", err)
+		}
+	})
+
+	t.Run("nodes instead of hostname", func(t *testing.T) {
+		c, err := parse("-user", "u", "-nodes", "a,b", "-database", "db", "-table", "t",
+			"-partition", "p", "-destination-disk", "cold")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.nodesList != "a,b" {
+			t.Fatalf("nodesList = %q", c.nodesList)
+		}
+	})
+
+	t.Run("password from env", func(t *testing.T) {
+		t.Setenv("CLICKHOUSE_PASSWORD", "secret")
+		c, err := parse("-user", "u", "-hostname", "h", "-database", "db",
+			"-table", "t", "-partition", "p", "-destination-disk", "cold")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.password != "secret" {
+			t.Fatalf("password = %q, want it from the env", c.password)
+		}
+	})
+}
 
 func TestConfirmPartMove(t *testing.T) {
 	cases := []struct {
