@@ -53,6 +53,29 @@ func TestMovePartitionSQL(t *testing.T) {
 	}
 }
 
+func TestMovePartSQL(t *testing.T) {
+	got := MovePartSQL("db", "events", "all_1_1_0", "cold")
+	want := "ALTER TABLE `db`.`events` MOVE PART 'all_1_1_0' TO DISK 'cold'"
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestIsPartGone(t *testing.T) {
+	cases := map[string]bool{
+		"clickhouse returned 500: Code: 232. DB::Exception: No part all_1_1_0 in committed state": true,
+		"Code: 232. DB::Exception: No such data part all_5_5_0":                                    true,
+		"Cannot find part all_9_9_0 to move":                                                       true,
+		"Code: 60. DB::Exception: Table demo.events does not exist":                                false,
+		"Code: 243. Not enough space":                                                              false,
+	}
+	for msg, want := range cases {
+		if got := isPartGone(errors.New(msg)); got != want {
+			t.Errorf("isPartGone(%q) = %v, want %v", msg, got, want)
+		}
+	}
+}
+
 func TestQuoteLiteral(t *testing.T) {
 	if got := quoteLiteral(`a\b'c`); got != `'a\\b\'c'` {
 		t.Errorf("quoteLiteral = %q", got)

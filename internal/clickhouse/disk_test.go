@@ -53,22 +53,26 @@ func TestDiskInfoMissingDisk(t *testing.T) {
 	}
 }
 
-func TestPartitionBytesToMove(t *testing.T) {
-	c := (&diskFakeServer{partsBody: "12345\n"}).serve(t)
-	n, err := c.PartitionBytesToMove(context.Background(), "db", "t", "202401", true, "cold")
+func TestPartitionParts(t *testing.T) {
+	c := (&diskFakeServer{partsBody: "all_1_1_0\t1024\tdefault\nall_2_2_0\t2048\tdefault\n"}).serve(t)
+	parts, err := c.PartitionParts(context.Background(), "db", "t", "202401", true, "cold")
 	if err != nil {
-		t.Fatalf("PartitionBytesToMove: %v", err)
+		t.Fatalf("PartitionParts: %v", err)
 	}
-	if n != 12345 {
-		t.Fatalf("got %d, want 12345", n)
+	want := []Part{
+		{Name: "all_1_1_0", Bytes: 1024, Disk: "default"},
+		{Name: "all_2_2_0", Bytes: 2048, Disk: "default"},
+	}
+	if len(parts) != 2 || parts[0] != want[0] || parts[1] != want[1] {
+		t.Fatalf("got %+v, want %+v", parts, want)
 	}
 }
 
-func TestPartitionBytesToMoveEmpty(t *testing.T) {
-	// sum() over no rows can come back empty; treat it as zero.
+func TestPartitionPartsEmpty(t *testing.T) {
+	// No parts to move (all already on target or empty partition).
 	c := (&diskFakeServer{partsBody: "\n"}).serve(t)
-	n, err := c.PartitionBytesToMove(context.Background(), "db", "t", "202401", false, "cold")
-	if err != nil || n != 0 {
-		t.Fatalf("got n=%d err=%v, want 0,nil", n, err)
+	parts, err := c.PartitionParts(context.Background(), "db", "t", "202401", false, "cold")
+	if err != nil || len(parts) != 0 {
+		t.Fatalf("got parts=%v err=%v, want empty,nil", parts, err)
 	}
 }

@@ -27,29 +27,41 @@ func (o MoveOptions) withDefaults() MoveOptions {
 	return o
 }
 
-// MovePartition runs the ALTER ... MOVE PARTITION in a dedicated goroutine and,
-// concurrently, watches its progress from the calling goroutine by polling
-// system.processes. This keeps a long-running move (e.g. to object storage) off a
-// single long-lived request while still reporting liveness; the authoritative
-// result comes straight from the MOVE request itself, so no log/parts inspection
-// is needed.
+// MovePartition runs ALTER ... MOVE PARTITION ... TO DISK, watching its progress
+// (see runMove).
+func (c *Client) MovePartition(ctx context.Context, database, table, partition, disk string, partitionIsID bool, opts MoveOptions) error {
+	return c.runMove(ctx, MovePartitionSQL(database, table, partition, disk, partitionIsID), database, table, opts)
+}
+
+// MovePart runs ALTER ... MOVE PART ... TO DISK for a single named part, watching
+// its progress (see runMove). If the part has since been merged away it returns
+// ErrPartGone.
+func (c *Client) MovePart(ctx context.Context, database, table, part, disk string, opts MoveOptions) error {
+	return c.runMove(ctx, MovePartSQL(database, table, part, disk), database, table, opts)
+}
+
+// runMove executes a MOVE statement in a dedicated goroutine and, concurrently,
+// watches its progress from the calling goroutine by polling system.processes.
+// This keeps a long-running move (e.g. to object storage) off a single long-lived
+// request while still reporting liveness; the authoritative result comes straight
+// from the MOVE request itself, so no log/parts inspection is needed.
 //
 // The overall deadline is taken from ctx (set it with context.WithTimeout).
 // Behaviour:
 //   - node unreachable       -> TransportError (transient; the caller may retry);
 //   - MOVE succeeds          -> nil;
 //   - already on target      -> ErrAlreadyOnTarget;
+//   - part merged away       -> ErrPartGone;
 //   - MOVE fails on server   -> the ClickHouse error;
 //   - ctx deadline hit       -> error noting the MOVE may still be running
 //     server-side (NOT transient, so it is not blindly retried).
-func (c *Client) MovePartition(ctx context.Context, database, table, partition, disk string, partitionIsID bool, opts MoveOptions) error {
+func (c *Client) runMove(ctx context.Context, sql, database, table string, opts MoveOptions) error {
 	opts = opts.withDefaults()
 
 	queryID, err := newQueryID()
 	if err != nil {
 		return fmt.Errorf("generating query id: %w", err)
 	}
-	sql := MovePartitionSQL(database, table, partition, disk, partitionIsID)
 
 	// Goroutine 1: execute the MOVE and report its definitive result. The channel
 	// is buffered so this goroutine never blocks, even if we have already returned.
@@ -70,6 +82,8 @@ func (c *Client) MovePartition(ctx context.Context, database, table, partition, 
 				return nil
 			case isAlreadyOnTarget(err):
 				return ErrAlreadyOnTarget
+			case isPartGone(err):
+				return ErrPartGone
 			case ctx.Err() != nil:
 				// The request ended because our deadline/cancel fired; the ALTER
 				// itself is not cancelled server-side and likely keeps running.

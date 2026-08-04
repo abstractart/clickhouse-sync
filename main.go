@@ -145,138 +145,183 @@ func run(ctx context.Context, cfg config) error {
 	}
 	fmt.Printf("Operating on %d node(s): %v\n", len(nodes), nodes)
 
-	sql := clickhouse.MovePartitionSQL(cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID)
-	fmt.Printf("Statement: %s\n\n", sql)
+	fmt.Printf("Moving partition %q of %s.%s to disk %q, part by part.\n\n", cfg.partition, cfg.database, cfg.table, cfg.disk)
 
-	// 2. Run the move on every node. Before each node we show that node's
-	//    destination-disk capacity and (unless -dry-run or -yes) ask to confirm.
-	//    Transient (network) errors are retried per node; ErrAlreadyOnTarget and
-	//    query errors are final.
+	// 2. On every node, enumerate the partition's parts and move them one at a
+	//    time. Before each part we show the node's destination-disk capacity and
+	//    (unless -dry-run or -yes) ask to confirm that specific part. Transient
+	//    (network) errors are retried; ErrAlreadyOnTarget and ErrPartGone are
+	//    treated as skips; other query errors are final.
 	stdin := bufio.NewReader(os.Stdin)
 	assumeYes := cfg.assumeYes
 	var failedNodes, declinedNodes []string
-	var skipped int
+	var moved, skipped int
 	for i, host := range nodes {
-		label := fmt.Sprintf("[%d/%d] %s", i+1, len(nodes), host)
+		nodeLabel := fmt.Sprintf("[node %d/%d] %s", i+1, len(nodes), host)
 		client := newClient(host)
 
-		// Show this node's destination-disk capacity now and projected after the
-		// move, so the decision to proceed is informed by that specific node.
-		printNodeCapacity(ctx, cfg, client, host, policy)
-
-		if cfg.dryRun {
-			fmt.Printf("%s: (dry-run) would execute\n", label)
+		var parts []clickhouse.Part
+		if err := clickhouse.Retry(ctx, policy, func() error {
+			var e error
+			parts, e = client.PartitionParts(ctx, cfg.database, cfg.table, cfg.partition, cfg.partitionIsID, cfg.disk)
+			return e
+		}); err != nil {
+			failedNodes = appendUnique(failedNodes, host)
+			fmt.Printf("%s: FAILED to list parts: %v\n", nodeLabel, err)
+			if !cfg.continueOnError {
+				return abort(failedNodes, "listing parts on "+host)
+			}
 			continue
 		}
-		if !assumeYes {
-			proceed, all, cerr := confirmNodeMove(host, stdin)
-			if cerr != nil {
-				return cerr // no readable stdin and not -yes: abort with guidance
-			}
-			if all {
-				assumeYes = true // "yes to all": stop asking for the remaining nodes
-			}
-			if !proceed {
-				declinedNodes = append(declinedNodes, host)
-				fmt.Printf("%s: SKIPPED (declined)\n", label)
+		if len(parts) == 0 {
+			fmt.Printf("%s: nothing to move (no parts outside disk %q)\n", nodeLabel, cfg.disk)
+			continue
+		}
+		fmt.Printf("%s: %d part(s), %s to move to disk %q\n", nodeLabel, len(parts), humanBytes(totalBytes(parts)), cfg.disk)
+
+		for j, part := range parts {
+			partLabel := fmt.Sprintf("  [part %d/%d] %s", j+1, len(parts), part.Name)
+
+			// Re-read the disk before each part so free space reflects the parts
+			// already moved on this node.
+			printPartCapacity(ctx, cfg, client, host, part, policy)
+
+			if cfg.dryRun {
+				fmt.Printf("%s: (dry-run) would move\n", partLabel)
 				continue
 			}
-		}
+			if !assumeYes {
+				proceed, all, cerr := confirmPartMove(host, part.Name, stdin)
+				if cerr != nil {
+					return cerr // no readable stdin and not -yes: abort with guidance
+				}
+				if all {
+					assumeYes = true // "yes to all": stop asking for the rest
+				}
+				if !proceed {
+					declinedNodes = appendUnique(declinedNodes, host)
+					fmt.Printf("%s: SKIPPED (declined)\n", partLabel)
+					continue
+				}
+			}
 
-		err := clickhouse.Retry(ctx, policy, func() error {
-			return moveOnNode(ctx, client, cfg)
-		})
-		switch {
-		case err == nil:
-			fmt.Printf("%s: OK\n", label)
-		case errors.Is(err, clickhouse.ErrAlreadyOnTarget):
-			// Idempotent no-op: the partition is already on the destination disk.
-			skipped++
-			fmt.Printf("%s: SKIP (already on disk %q)\n", label, cfg.disk)
-		default:
-			failedNodes = append(failedNodes, host)
-			fmt.Printf("%s: FAILED: %v\n", label, err)
-			if !cfg.continueOnError {
-				fmt.Fprintf(os.Stderr, "\nFailed node(s): %s\nRe-run against just these with: -nodes %s\n",
-					strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
-				return fmt.Errorf("aborting after failure on %s (use -continue-on-error to keep going)", host)
+			err := clickhouse.Retry(ctx, policy, func() error {
+				return movePartOnNode(ctx, client, cfg, part.Name)
+			})
+			switch {
+			case err == nil:
+				moved++
+				fmt.Printf("%s: OK\n", partLabel)
+			case errors.Is(err, clickhouse.ErrAlreadyOnTarget):
+				skipped++
+				fmt.Printf("%s: SKIP (already on disk %q)\n", partLabel, cfg.disk)
+			case errors.Is(err, clickhouse.ErrPartGone):
+				// Merged away between listing and moving; a re-run moves the merged
+				// result. Not a failure.
+				skipped++
+				fmt.Printf("%s: SKIP (part gone, likely merged; re-run to move its data)\n", partLabel)
+			default:
+				failedNodes = appendUnique(failedNodes, host)
+				fmt.Printf("%s: FAILED: %v\n", partLabel, err)
+				if !cfg.continueOnError {
+					return abort(failedNodes, "part "+part.Name+" on "+host)
+				}
 			}
 		}
 	}
 
+	if cfg.dryRun {
+		fmt.Printf("\nDry-run complete: no changes made.\n")
+		return nil
+	}
 	if len(failedNodes) > 0 {
-		// Surface the failed nodes so the operator can re-drive just those once
-		// they recover; the move is idempotent, so a full re-run is also safe.
-		fmt.Fprintf(os.Stderr, "\nFailed node(s): %s\nRe-run against just these with: -nodes %s\n",
+		// Surface the affected nodes so the operator can re-drive just those once
+		// they recover; per-part moves are idempotent and re-enumerate, so a
+		// re-run is safe and picks up exactly what remains.
+		fmt.Fprintf(os.Stderr, "\nNode(s) with failed part move(s): %s\nRe-run against just these with: -nodes %s\n",
 			strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
-		return fmt.Errorf("%d of %d node(s) failed", len(failedNodes), len(nodes))
+		return fmt.Errorf("part move(s) failed on %d node(s) (%d moved, %d skipped)", len(failedNodes), moved, skipped)
 	}
 	if len(declinedNodes) > 0 {
-		// The operator skipped some nodes, so the partition is not on the target
-		// disk everywhere. Report which, so they can re-run against just those.
-		fmt.Fprintf(os.Stderr, "\nSkipped by user: %s\nRe-run against just these with: -nodes %s\n",
+		fmt.Fprintf(os.Stderr, "\nNode(s) with skipped part(s): %s\nRe-run against just these with: -nodes %s\n",
 			strings.Join(declinedNodes, ","), strings.Join(declinedNodes, ","))
-		return fmt.Errorf("%d of %d node(s) skipped by user; partition not relocated everywhere", len(declinedNodes), len(nodes))
+		return fmt.Errorf("some part(s) skipped by user on %d node(s); partition not relocated everywhere", len(declinedNodes))
 	}
-	fmt.Printf("\nDone: partition present on disk %q on all %d node(s) (%d moved, %d already there).\n",
-		cfg.disk, len(nodes), len(nodes)-skipped, skipped)
+	fmt.Printf("\nDone: %d part(s) moved to disk %q, %d already there, across %d node(s).\n",
+		moved, cfg.disk, skipped, len(nodes))
 	return nil
 }
 
-// moveOnNode performs the partition move on a single node. -timeout bounds the
-// whole operation (kick-off + polling), not a single request.
-func moveOnNode(ctx context.Context, client *clickhouse.Client, cfg config) error {
+// abort prints the failed-node hint and returns the aborting error used when
+// -continue-on-error is not set.
+func abort(failedNodes []string, what string) error {
+	fmt.Fprintf(os.Stderr, "\nNode(s) with failed part move(s): %s\nRe-run against just these with: -nodes %s\n",
+		strings.Join(failedNodes, ","), strings.Join(failedNodes, ","))
+	return fmt.Errorf("aborting after failure (%s); use -continue-on-error to keep going", what)
+}
+
+// totalBytes sums the on-disk size of the given parts.
+func totalBytes(parts []clickhouse.Part) uint64 {
+	var n uint64
+	for _, p := range parts {
+		n += p.Bytes
+	}
+	return n
+}
+
+// appendUnique appends v to list only if not already present, preserving order.
+func appendUnique(list []string, v string) []string {
+	for _, x := range list {
+		if x == v {
+			return list
+		}
+	}
+	return append(list, v)
+}
+
+// movePartOnNode moves a single named part on one node. -timeout bounds the whole
+// operation (kick-off + polling), not a single request.
+func movePartOnNode(ctx context.Context, client *clickhouse.Client, cfg config, part string) error {
 	opCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
 	defer cancel()
-	return client.MovePartition(opCtx, cfg.database, cfg.table, cfg.partition, cfg.disk, cfg.partitionIsID,
+	return client.MovePart(opCtx, cfg.database, cfg.table, part, cfg.disk,
 		clickhouse.MoveOptions{PollInterval: cfg.pollInterval})
 }
 
-// printNodeCapacity reports one node's destination-disk capacity: free space,
-// current usage %, and the usage % projected once the partition lands, plus the
-// bytes that will actually move. It is best-effort: read failures are printed
-// inline and do not abort (the move loop handles unreachable nodes), so the
-// operator still sees a line for every node before deciding.
-func printNodeCapacity(ctx context.Context, cfg config, client *clickhouse.Client, host string, policy clickhouse.RetryPolicy) {
+// printPartCapacity reports the destination-disk capacity on this node just
+// before a part is moved: free space, current usage %, and the usage % projected
+// once this part lands, alongside the part's size. It is best-effort: a read
+// failure is printed inline and does not abort (the move itself will surface a
+// real problem), so the operator still sees a line before each decision.
+func printPartCapacity(ctx context.Context, cfg config, client *clickhouse.Client, host string, part clickhouse.Part, policy clickhouse.RetryPolicy) {
 	var di clickhouse.DiskInfo
 	if err := clickhouse.Retry(ctx, policy, func() error {
 		var e error
 		di, e = client.DiskInfo(ctx, cfg.disk)
 		return e
 	}); err != nil {
-		fmt.Printf("  %s: disk %q — could not read capacity: %v\n", host, cfg.disk, err)
-		return
-	}
-
-	var moving uint64
-	if err := clickhouse.Retry(ctx, policy, func() error {
-		var e error
-		moving, e = client.PartitionBytesToMove(ctx, cfg.database, cfg.table, cfg.partition, cfg.partitionIsID, cfg.disk)
-		return e
-	}); err != nil {
-		fmt.Printf("  %s: disk %q — free %s / %s, used %.1f%% (partition size unknown: %v)\n",
-			host, cfg.disk, humanBytes(di.Free), humanBytes(di.Total), percent(di.Used(), di.Total), err)
+		fmt.Printf("    %s (%s): disk %q — could not read capacity: %v\n", part.Name, humanBytes(part.Bytes), cfg.disk, err)
 		return
 	}
 
 	used := di.Used()
-	line := fmt.Sprintf("  %s: disk %q — free %s / %s, used %.1f%% -> %.1f%% after moving %s",
-		host, cfg.disk, humanBytes(di.Free), humanBytes(di.Total),
-		percent(used, di.Total), percent(used+moving, di.Total), humanBytes(moving))
-	if moving > di.Free {
-		line += "  !! MOVE needs more than the free space"
+	line := fmt.Sprintf("    %s (%s): disk %q — free %s / %s, used %.1f%% -> %.1f%% after this part",
+		part.Name, humanBytes(part.Bytes), cfg.disk, humanBytes(di.Free), humanBytes(di.Total),
+		percent(used, di.Total), percent(used+part.Bytes, di.Total))
+	if part.Bytes > di.Free {
+		line += "  !! part is larger than the free space"
 	}
 	fmt.Println(line)
 }
 
-// confirmNodeMove asks whether to move on a single node. It returns proceed
-// (move this node), all (proceed on this and every remaining node without asking
+// confirmPartMove asks whether to move a single part. It returns proceed (move
+// this part), all (proceed on this and every remaining part without asking
 // again), and an error only when stdin cannot be read — e.g. a non-interactive
 // run without -yes — so the caller aborts with guidance instead of hanging or
 // assuming yes. Answers: y/yes -> proceed; a/all -> proceed on all; anything
-// else (including empty) -> skip this node.
-func confirmNodeMove(host string, r *bufio.Reader) (proceed, all bool, err error) {
-	fmt.Printf("  Proceed on %s? [y/N/a=yes to all]: ", host)
+// else (including empty) -> skip this part.
+func confirmPartMove(host, part string, r *bufio.Reader) (proceed, all bool, err error) {
+	fmt.Printf("    Move part %s on %s? [y/N/a=yes to all]: ", part, host)
 	line, rerr := r.ReadString('\n')
 	if rerr != nil && line == "" {
 		return false, false, fmt.Errorf("aborted: could not read confirmation (%v); pass -yes for non-interactive runs", rerr)
