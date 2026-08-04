@@ -19,6 +19,7 @@ import (
 // Client executes queries against a single ClickHouse node over HTTP(S).
 type Client struct {
 	baseURL  string
+	addr     string
 	user     string
 	password string
 	http     *http.Client
@@ -61,11 +62,15 @@ func New(o Options) *Client {
 	}
 	return &Client{
 		baseURL:  fmt.Sprintf("https://%s:%d/", o.Host, o.Port),
+		addr:     fmt.Sprintf("%s:%d", o.Host, o.Port),
 		user:     o.User,
 		password: o.Password,
 		http:     &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
+
+// Addr returns the node's host:port, for use in logs and error messages.
+func (c *Client) Addr() string { return c.addr }
 
 // Exec sends a query and returns the raw response body. It returns an error if
 // ClickHouse answers with a non-2xx status.

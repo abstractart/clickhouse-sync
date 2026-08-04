@@ -23,12 +23,16 @@ type fakeServer struct {
 	alterStatus int           // HTTP status for the ALTER; 0 means 200
 	alterBody   string        // response body for the ALTER
 	polls       atomic.Int32  // number of system.processes checks observed
+	moveProbes  atomic.Int32  // number of system.moves detail checks observed
 }
 
 func (f *fakeServer) handler(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	q := string(body)
 	switch {
+	case strings.Contains(q, "system.moves"):
+		f.moveProbes.Add(1)
+		io.WriteString(w, "2\t1.5\tcold\n") // 2 parts moving to 'cold', 1.5s elapsed
 	case strings.Contains(q, "system.processes"):
 		f.polls.Add(1)
 		io.WriteString(w, "1\n") // report the MOVE as running
@@ -76,6 +80,9 @@ func TestMovePartitionSuccessWhileWatched(t *testing.T) {
 	}
 	if fs.polls.Load() == 0 {
 		t.Fatal("status-watching goroutine never polled while the MOVE ran")
+	}
+	if fs.moveProbes.Load() == 0 {
+		t.Fatal("status-watching goroutine never enriched progress from system.moves")
 	}
 }
 

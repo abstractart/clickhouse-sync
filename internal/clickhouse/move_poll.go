@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -72,13 +73,17 @@ func (c *Client) MovePartition(ctx context.Context, database, table, partition, 
 			case ctx.Err() != nil:
 				// The request ended because our deadline/cancel fired; the ALTER
 				// itself is not cancelled server-side and likely keeps running.
-				return fmt.Errorf("MOVE did not finish within the deadline and may still be running server-side (query_id=%s): %w", queryID, ctx.Err())
+				return fmt.Errorf("MOVE did not finish within the deadline and may still be running server-side on %s (query_id=%s): %w", c.addr, queryID, ctx.Err())
 			default:
 				return err
 			}
 		case <-ticker.C:
 			if running, err := c.queryRunning(ctx, queryID, opts.StatusTimeout); err == nil && running {
-				fmt.Printf("    MOVE in progress (query_id=%s)\n", queryID)
+				msg := fmt.Sprintf("    MOVE in progress on %s (query_id=%s)", c.addr, queryID)
+				if detail := c.moveProgress(ctx, database, table, opts.StatusTimeout); detail != "" {
+					msg += " — " + detail
+				}
+				fmt.Println(msg)
 			}
 		}
 	}
@@ -93,6 +98,32 @@ func (c *Client) queryRunning(ctx context.Context, queryID string, timeout time.
 		return false, err
 	}
 	return len(vals) == 1 && vals[0] != "0", nil
+}
+
+// moveProgress returns a best-effort, human-readable summary of the part moves
+// currently active for the given table, taken from system.moves. Unlike the
+// liveness probe (which matches our exact query_id in system.processes),
+// system.moves has no query_id column, so this is matched by database/table
+// only: it may occasionally reflect an unrelated concurrent move of the same
+// table. It is used purely to enrich the progress log, never to decide the
+// operation's outcome, so that imprecision is acceptable. Any error (including
+// older servers without system.moves) yields an empty string, and the caller
+// simply logs the plain liveness line.
+func (c *Client) moveProgress(ctx context.Context, database, table string, timeout time.Duration) string {
+	qctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	q := "SELECT count(), round(max(elapsed), 1), arrayStringConcat(groupUniqArray(target_disk_name), ',') " +
+		"FROM system.moves WHERE database = " + quoteLiteral(database) +
+		" AND table = " + quoteLiteral(table)
+	out, err := c.Exec(qctx, q+"\nFORMAT TabSeparated")
+	if err != nil {
+		return ""
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) < 3 || fields[0] == "0" || fields[0] == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s part(s) → disk %s, elapsed %ss", fields[0], fields[2], fields[1])
 }
 
 // newQueryID returns a random 128-bit hex identifier.
