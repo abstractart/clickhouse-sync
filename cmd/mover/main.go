@@ -186,8 +186,13 @@ func run(ctx context.Context, cfg config) error {
 			// already moved on this node.
 			printPartCapacity(ctx, cfg, client, host, part, policy)
 
+			// Show the exact statement that will run for this part, so it is
+			// visible before the confirmation (and in dry-run).
+			sql := clickhouse.MovePartSQL(cfg.database, cfg.table, part.Name, cfg.disk)
+			fmt.Printf("      SQL: %s\n", sql)
+
 			if cfg.dryRun {
-				fmt.Printf("%s: (dry-run) would move\n", partLabel)
+				fmt.Printf("%s: (dry-run) would run the SQL above\n", partLabel)
 				continue
 			}
 			if !assumeYes {
