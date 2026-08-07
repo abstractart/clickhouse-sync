@@ -4,7 +4,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 # is a manual research stand with no automated tests.
 COVERPKG := $(shell go list ./... | grep -v '/cmd/fscache' | paste -sd, -)
 
-.PHONY: build test test-integration cover cover-html up schema load init down clean demo move show client bucket truncate fscache-demo help
+.PHONY: build test test-integration cover cover-html up schema load init down clean demo move show client bucket truncate fscache-demo fscache-swap-demo help
 
 ## build the mover binary
 build:
@@ -66,6 +66,10 @@ bucket:
 ## run the filesystem_cache demo (S3 + local cache; shows cold read vs warm cache hit)
 fscache-demo:
 	$(COMPOSE) --profile tools run --rm fscache
+
+## reproduce the in-place disk swap: attach cache to an EXISTING table with no data copy
+fscache-swap-demo:
+	bash deploy/scripts/fscache-inplace-swap.sh
 
 ## fully empty demo.events_local (clean slate; re-run `make init` to reload data)
 truncate:

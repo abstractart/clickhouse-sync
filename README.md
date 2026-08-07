@@ -303,6 +303,15 @@ Result — same scan, cache dropped in between:
 ProfileEvents, когда кэш уместнее переноса и наоборот) — в
 [`docs/research/filesystem-cache.md`](docs/research/filesystem-cache.md).
 
+Подключить кэш к **уже существующей** таблице без копирования данных (in-place
+подмена диска) воспроизводится отдельно:
+
+```sh
+make up
+make fscache-swap-demo   # deploy/scripts/fscache-inplace-swap.sh
+make down
+```
+
 Можно прокинуть и разовый запрос — аргументы добавляются к готовой команде:
 
 ```sh
